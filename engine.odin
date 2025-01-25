@@ -18,8 +18,6 @@ WAVE_SIZE :: 88200
 MAX_VALUE :: 32767
 MIN_VALUE :: -32767
 
-// sine_table: [WAVE_SIZE]i64
-
 Wave :: struct {
   data: []i64,
   size: u64,
@@ -57,6 +55,63 @@ mksine :: proc(size: int) -> []i64 {
     sine_table[i] = i64(x)
   }
   return sine_table
+}
+
+mktri :: proc(size: int) -> []i64 {
+  table := make([]i64, size)
+  fsize := f64(len(table))
+  half := size/2
+  for i in 0..<len(table) {
+    phase := f64(i)
+    x := 0
+    if i < half {
+      x = (2 * MAX_VALUE * i + half - 1) / half
+    } else {
+      x = (2 * MAX_VALUE * (size - i - 1) + half - 1) / half
+    }
+    table[i] = i64(x-MAX_VALUE)
+  }
+  return table
+}
+
+mksqr :: proc(size: int) -> []i64 {
+  table := make([]i64, size)
+  fsize := f64(len(table))
+  half := size/2
+  for i in 0..<len(table) {
+    x := 0
+    if i < half {
+      x = MAX_VALUE
+    } else {
+      x = -MAX_VALUE
+    }
+    table[i] = i64(x)
+  }
+  return table
+}
+
+mksawup :: proc(size: int) -> []i64 {
+  table := make([]i64, size)
+  fsize := f64(len(table))
+  acc := f64(MIN_VALUE)
+  rate := MAX_VALUE * 2 / f64(size)
+  for i in 0..<len(table) {
+    table[i] = i64(acc)
+    acc += rate
+  }
+  return table
+}
+
+mksawdn :: proc(size: int) -> []i64 {
+  table := make([]i64, size)
+  fsize := f64(len(table))
+  acc := f64(MAX_VALUE)
+  rate := MAX_VALUE * 2 / f64(size)
+  for i in 0..<len(table) {
+    table[i] = i64(acc)
+    acc -= rate
+  }
+  return table
 }
 
 /*
@@ -111,7 +166,8 @@ wave_next :: proc(voice: int) -> i64 {
   }
   mod := i64(fmod)
   if mod != 0 {
-    mod *= synth[voice].dds_modscale
+    scale := synth[voice].dds_modscale
+    mod *= scale
   }
   thewave := wave[synth[voice].waveform]
   sample := thewave.data[index % thewave.size]
@@ -258,9 +314,20 @@ main :: proc() {
     wave[w].hz = 0
   }
 
-  // mksine()
   wave[0].data = mksine(WAVE_SIZE)
-  wave[0].size = u64(len(wave[0].data))
+  wave[0].size = WAVE_SIZE
+  
+  wave[1].data = mksqr(WAVE_SIZE)
+  wave[1].size = WAVE_SIZE
+
+  wave[2].data = mksawup(WAVE_SIZE)
+  wave[2].size = WAVE_SIZE
+
+  wave[3].data = mksawdn(WAVE_SIZE)
+  wave[3].size = WAVE_SIZE
+
+  wave[4].data = mktri(WAVE_SIZE)
+  wave[4].size = WAVE_SIZE
   
   result = ma.device_init(nil, &config, &device)
   if result != .SUCCESS {
