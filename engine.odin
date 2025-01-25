@@ -30,11 +30,12 @@ WAVEFORMS :: 99
 wave: [WAVEFORMS]Wave
 
 Voice :: struct {
-  waveform: i16,
+  waveform: int,
   hz: f64,
   dds_inc: i64,
   dds_acc: u64,
   dds_mod: i16,
+  dds_modexp: int,
   dds_modscale: i64,
   gain: f64,
   gain_val: i64,
@@ -129,17 +130,15 @@ DDS_SCALE :: 1 << DDS_FRAC
 DDS_MASK :: DDS_SCALE-1
 
 // for Q8.24
-GAIN_FRAC :: 8
+GAIN_FRAC :: 15
+// GAIN_FRAC :: 8
 GAIN_SCALE :: 1 << GAIN_FRAC
 GAIN_MASK :: GAIN_SCALE-1
-
-dds_inc := i32(0)
-dds_acc := u64(0)
 
 wave_freq :: proc(voice: int, f: f64) {
   synth[voice].hz = f
   size := wave[synth[voice].waveform].size
-  base := wave[synth[voice].waveform].base // use this
+  // base := wave[synth[voice].waveform].base // use this
   synth[voice].dds_inc = i64( f * f64(size) / SAMPLE_RATE * DDS_SCALE  )
 }
 
@@ -177,8 +176,6 @@ wave_next :: proc(voice: int) -> i64 {
   synth[voice].dds_acc += ( u64(synth[voice].dds_inc + mod ) )
   return sample
 }
-
-DDS_MOD_SCALE :: 4
 
 exsynthia :: proc(device: ^ma.device, output, input: rawptr, frame_count: u64) {
   out_s16 := cast(^[MAX_FRAMES]i16)(output)
@@ -228,7 +225,7 @@ show_voice :: proc(voice: int, flag: bool) {
         synth[voice].hz,
         synth[voice].gain,
         synth[voice].dds_mod,
-        synth[voice].dds_modscale,
+        synth[voice].dds_modexp,
         m,
         //
         synth[voice].dds_inc,
@@ -303,6 +300,90 @@ captureCount: u32
 config: ma.device_config
 device: ma.device
 
+wire :: proc(voice:int, buf: []byte, n: int) -> int {
+  current_voice := voice
+  //
+  if buf[0] == 'f' {
+    str := string(buf[1:n])
+    f := strconv.atof(str)
+    wave_freq(current_voice, f)
+  } else if buf[0] == 'a' {
+    str := string(buf[1:n])
+    g := strconv.atof(str)
+    wave_gain(current_voice, g)
+  } else if buf[0] == 'v' {
+    str := string(buf[1:n])
+    v := strconv.atoi(str)
+    if v >= 0 && v < VOICES {
+      current_voice = v
+    }
+  } else if buf[0] == 'M' {
+    str := string(buf[1:n])
+    if str[0] == '1' {
+      synth[current_voice].ismod = true
+    } else {
+      synth[current_voice].ismod = false
+    }
+  } else if buf[0] == 'F' {
+    if buf[1] == 'S' {
+      str := string(buf[2:n])
+      s := strconv.atoi(str)
+      exp := i64(1 << u64(s))
+      synth[current_voice].dds_modexp = s
+      synth[current_voice].dds_modscale = exp
+    } else {
+      str := string(buf[1:n])
+      v := strconv.atoi(str)
+      if v >= 0 && v < VOICES {
+        synth[v].ismod = true
+        synth[current_voice].dds_mod = i16(v)
+      } else {
+        synth[current_voice].dds_mod = -1
+      }
+    }
+} else if buf[0] == 'W' {
+  str := string(buf[1:n])
+    w := strconv.atoi(str)
+    if w >= 0 && w < WAVEFORMS {
+      COLS := 80
+      ROWS := 20
+      b := makebm(COLS, ROWS)
+      table := wave[w].data
+      size := int(wave[w].size)
+      fmt.printf("size:%d\n", size)
+      for i in 0..<size {
+        x := table[i]
+        cx := mapper(int(x), MIN_VALUE, MAX_VALUE, 0, ROWS-1)
+        cy := mapper(i, 0, size, 0, COLS-1)
+        setbm(b, cx, cy, 1)
+      }
+      showbm(b)
+    }
+} else if buf[0] == 'w' {
+    str := string(buf[1:n])
+    w := strconv.atoi(str)
+    if w >= 0 && w < WAVEFORMS {
+      last_wave := synth[current_voice].waveform
+      synth[current_voice].waveform = w
+      if w != last_wave {
+        wave_freq(current_voice, synth[current_voice].hz)
+      }
+    }
+  } else if buf[0] == '?' {
+    if buf[1] == '?' { 
+      for v in 0..<VOICES {
+        if synth[v].hz > 0 && synth[v].gain > 0 {
+          show_voice(v, v == current_voice)
+        }
+      }
+    } else {
+      show_voice(current_voice, false)
+    }
+  }
+  //
+  return current_voice
+}
+
 main :: proc() {
   args := os.args
   fmt.println(args)
@@ -369,24 +450,24 @@ main :: proc() {
     wave[w].hz = 0
   }
 
-  wave[0].data = mksine(WAVE_SIZE)
-  wave[0].size = WAVE_SIZE
+  wave[0].data = mksine(WAVE_SIZE*2)
+  wave[0].size = u64(len(wave[0].data))
   wave[0].base = 1
   
-  wave[1].data = mksqr(WAVE_SIZE)
-  wave[1].size = WAVE_SIZE
+  wave[1].data = mksqr(WAVE_SIZE/2)
+  wave[1].size = u64(len(wave[1].data))
   wave[1].base = 1
 
   wave[2].data = mksawup(WAVE_SIZE)
-  wave[2].size = WAVE_SIZE
+  wave[2].size = u64(len(wave[2].data))
   wave[2].base = 1
 
   wave[3].data = mksawdn(WAVE_SIZE)
-  wave[3].size = WAVE_SIZE
+  wave[3].size = u64(len(wave[3].data))
   wave[3].base = 1
 
   wave[4].data = mktri(WAVE_SIZE)
-  wave[4].size = WAVE_SIZE
+  wave[4].size = u64(len(wave[4].data))
   wave[4].base = 1
   
   result = ma.device_init(nil, &config, &device)
@@ -411,6 +492,7 @@ main :: proc() {
     synth[v].audible = true
     synth[v].dds_mod = -1
     synth[v].dds_modscale = DDS_SCALE
+    synth[v].dds_modexp = DDS_FRAC
   }
 
   current_voice := 0
@@ -420,75 +502,6 @@ main :: proc() {
     if err != nil || n <= 1 {
       break
     }
-    if buf[0] == 'f' {
-      str := string(buf[1:n])
-      f := strconv.atof(str)
-      wave_freq(current_voice, f)
-    } else if buf[0] == 'a' {
-      str := string(buf[1:n])
-      g := strconv.atof(str)
-      wave_gain(current_voice, g)
-    } else if buf[0] == 'v' {
-      str := string(buf[1:n])
-      v := strconv.atoi(str)
-      if v >= 0 && v < VOICES {
-        current_voice = v
-      }
-    } else if buf[0] == 'M' {
-      str := string(buf[1:n])
-      if str[0] == '1' {
-        synth[current_voice].ismod = true
-      } else {
-        synth[current_voice].ismod = false
-      }
-    } else if buf[0] == 'F' {
-      if buf[1] == 'S' {
-        str := string(buf[2:n])
-        s := strconv.atoi(str)
-        synth[current_voice].dds_modscale = i64(s)
-      } else {
-        str := string(buf[1:n])
-        v := strconv.atoi(str)
-        if v >= 0 && v < VOICES {
-          synth[v].ismod = true
-          synth[current_voice].dds_mod = i16(v)
-        } else {
-          synth[current_voice].dds_mod = -1
-        }
-      }
-  } else if buf[0] == 'W' {
-    str := string(buf[1:n])
-      w := strconv.atoi(str)
-      if w >= 0 && w < WAVEFORMS {
-        COLS := 80
-        ROWS := 20
-        b := makebm(COLS, ROWS)
-        table := wave[w].data
-        size := int(wave[w].size)
-        for i in 0..<size {
-          x := table[i]
-          cx := mapper(int(x), MIN_VALUE, MAX_VALUE, 0, ROWS-1)
-          cy := mapper(i, 0, size, 0, COLS-1)
-          setbm(b, cx, cy, 1)
-        }
-        showbm(b)
-      }
-  } else if buf[0] == 'w' {
-      str := string(buf[1:n])
-      w := strconv.atoi(str)
-      if w >= 0 && w < WAVEFORMS {
-        synth[current_voice].waveform = i16(w)
-      }
-    } else if buf[0] == '?' {
-      if buf[1] == '?' { 
-        for v in 0..<VOICES {
-          if synth[v].hz > 0 && synth[v].gain > 0 {
-            show_voice(v, v == current_voice)
-          }
-        }
-      } else {
-        show_voice(current_voice, false)
-      }
-    }
+    current_voice = wire(current_voice, buf[:], n)
   }
 }
