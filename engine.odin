@@ -21,6 +21,7 @@ MIN_VALUE :: -32767
 Wave :: struct {
   data: []i64,
   size: u64,
+  base: u64,
   hz: f64,
 }
 
@@ -48,10 +49,9 @@ synth: [VOICES]Voice
 
 mksine :: proc(size: int) -> []i64 {
   sine_table := make([]i64, size)
-  fsize := f64(len(sine_table))
-  for i in 0..<len(sine_table) {
+  for i in 0..<size {
     phase := f64(i)
-    x := MAX_VALUE * math.sin(math.TAU * f64(phase) / fsize)
+    x := MAX_VALUE * math.sin(math.TAU * f64(phase) / f64(size))
     sine_table[i] = i64(x)
   }
   return sine_table
@@ -138,7 +138,9 @@ dds_acc := u64(0)
 
 wave_freq :: proc(voice: int, f: f64) {
   synth[voice].hz = f
-  synth[voice].dds_inc = i64( f * f64(WAVE_SIZE) / SAMPLE_RATE * DDS_SCALE  )
+  size := wave[synth[voice].waveform].size
+  base := wave[synth[voice].waveform].base // use this
+  synth[voice].dds_inc = i64( f * f64(size) / SAMPLE_RATE * DDS_SCALE  )
 }
 
 gain_val := i64(0)
@@ -235,6 +237,59 @@ show_voice :: proc(voice: int, flag: bool) {
       )
 }
 
+bm :: struct {
+  cols: int,
+  rows: int,
+  pixel: [][]int,
+  // color: [][]int,
+}
+
+makebm :: proc(cols:int, rows:int) -> bm {
+  b: bm
+  b.cols = cols
+  b.rows = rows
+  b.pixel = make([][]int, cols)
+  for i in 0..<len(b.pixel) {
+    b.pixel[i] = make([]int, rows)
+  }
+  return b
+}
+
+setbm :: proc(b: bm, x: int, y:int, c:int) {
+  ax := x
+  ay := y
+  if ax < 0 {
+    ax = 0
+  }
+  if ay < 0 {
+    ay = 0
+  }
+  if ax > b.rows-1 {
+    ax = b.rows-1
+  }
+  if ay > b.cols-1 {
+    ay = b.cols-1
+  }
+  b.pixel[ay][ax] = c
+}
+
+showbm :: proc(b: bm) {
+  for y in 0..<b.rows {
+    for x in 0..<b.cols {
+      if b.pixel[x][y] == 1 {
+        fmt.printf("#")
+      } else {
+        fmt.printf(" ")
+      }
+    }
+    fmt.printf("\n")
+  }
+}
+
+mapper :: proc(x: int, in_min: int, in_max: int, out_min: int, out_max: int) -> int {
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
+}
+
 engine: ma.engine
 
 context_type: ma.context_type
@@ -316,18 +371,23 @@ main :: proc() {
 
   wave[0].data = mksine(WAVE_SIZE)
   wave[0].size = WAVE_SIZE
+  wave[0].base = 1
   
   wave[1].data = mksqr(WAVE_SIZE)
   wave[1].size = WAVE_SIZE
+  wave[1].base = 1
 
   wave[2].data = mksawup(WAVE_SIZE)
   wave[2].size = WAVE_SIZE
+  wave[2].base = 1
 
   wave[3].data = mksawdn(WAVE_SIZE)
   wave[3].size = WAVE_SIZE
+  wave[3].base = 1
 
   wave[4].data = mktri(WAVE_SIZE)
   wave[4].size = WAVE_SIZE
+  wave[4].base = 1
   
   result = ma.device_init(nil, &config, &device)
   if result != .SUCCESS {
@@ -395,6 +455,23 @@ main :: proc() {
         } else {
           synth[current_voice].dds_mod = -1
         }
+      }
+  } else if buf[0] == 'W' {
+    str := string(buf[1:n])
+      w := strconv.atoi(str)
+      if w >= 0 && w < WAVEFORMS {
+        COLS := 80
+        ROWS := 20
+        b := makebm(COLS, ROWS)
+        table := wave[w].data
+        size := int(wave[w].size)
+        for i in 0..<size {
+          x := table[i]
+          cx := mapper(int(x), MIN_VALUE, MAX_VALUE, 0, ROWS-1)
+          cy := mapper(i, 0, size, 0, COLS-1)
+          setbm(b, cx, cy, 1)
+        }
+        showbm(b)
       }
   } else if buf[0] == 'w' {
       str := string(buf[1:n])
