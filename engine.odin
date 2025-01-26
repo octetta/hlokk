@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:math"
+import "core:mem"
 import "core:os"
 import "core:strconv"
 import "core:time"
@@ -13,7 +14,7 @@ CHANNELS :: 2
 
 MAX_FRAMES :: 128 * 1024 * CHANNELS
 
-WAVE_SIZE :: 88200
+WAVE_SIZE :: 44100
 
 MAX_VALUE :: 32767
 MIN_VALUE :: -32767
@@ -21,7 +22,8 @@ MIN_VALUE :: -32767
 Wave :: struct {
   data: []i64,
   size: u64,
-  base: u64,
+  ispcm: bool,
+  loop: bool,
   hz: f64,
 }
 
@@ -138,11 +140,15 @@ GAIN_MASK :: GAIN_SCALE-1
 wave_freq :: proc(voice: int, f: f64) {
   synth[voice].hz = f
   size := wave[synth[voice].waveform].size
-  // base := wave[synth[voice].waveform].base // use this
-  synth[voice].dds_inc = i64( f * f64(size) / SAMPLE_RATE * DDS_SCALE  )
+  if wave[synth[voice].waveform].ispcm {
+    hz := wave[synth[voice].waveform].hz
+    synth[voice].dds_inc = i64( f / hz * DDS_SCALE )
+  } else {
+    synth[voice].dds_inc = i64( f * f64(size) / SAMPLE_RATE * DDS_SCALE  )
+  }
 }
 
-gain_val := i64(0)
+// gain_val := i64(0)
 
 AMY_FACTOR :: 0.025
 
@@ -174,6 +180,10 @@ wave_next :: proc(voice: int) -> i64 {
   sample := thewave.data[index % thewave.size]
   synth[voice].sample = sample
   synth[voice].dds_acc += ( u64(synth[voice].dds_inc + mod ) )
+  if index > thewave.size {
+
+  }
+  index = index % thewave.size
   return sample
 }
 
@@ -218,7 +228,7 @@ show_voice :: proc(voice: int, flag: bool) {
   if synth[voice].ismod {
     m = "1"
   }
-  fmt.printf("%s v%d w%d f%g a%g F%d FS%d M%s # %d (%d,%d)\n",
+  fmt.printf("%s v%d w%d f%g a%g F%d FS%d M%s # inc:%g\n",
         s,
         voice,
         synth[voice].waveform,
@@ -228,9 +238,8 @@ show_voice :: proc(voice: int, flag: bool) {
         synth[voice].dds_modexp,
         m,
         //
-        synth[voice].dds_inc,
-        synth[voice].dds_inc >> DDS_FRAC,
-        0
+        // synth[voice].dds_inc,
+        f64(synth[voice].dds_inc) / f64(DDS_SCALE)
       )
 }
 
@@ -317,6 +326,11 @@ wire :: proc(voice:int, buf: []byte, n: int) -> int {
     if v >= 0 && v < VOICES {
       current_voice = v
     }
+  } else if buf[0] == 'n' {
+    str := string(buf[1:n])
+    n := strconv.atof(str)
+    f := 440.0 * math.pow(2.0, (n - 69.0) / 12.0)
+    wave_freq(current_voice, f)
   } else if buf[0] == 'M' {
     str := string(buf[1:n])
     if str[0] == '1' {
@@ -341,6 +355,41 @@ wire :: proc(voice:int, buf: []byte, n: int) -> int {
         synth[current_voice].dds_mod = -1
       }
     }
+} else if buf[0] == '<' {
+  if buf[1] == 'p' {
+    str := string(buf[2:n])
+    p := strconv.atoi(str)
+    fmt.println("load patch", p)
+    config: ma.decoder_config
+    result: ma.result
+    frame_count: u64
+    samples_ptr: rawptr
+    result = ma.decode_file("024.wav", &config, &frame_count, &samples_ptr)
+    if result != .SUCCESS {
+      fmt.println("decode_file failed")
+    } else {
+      // fmt.printf("frame_count:%d\n", frame_count)
+      // fmt.println(config)
+      if config.format == .s16 && config.channels == 2 && config.sampleRate == SAMPLE_RATE {
+        samples_ptr_i16 := cast(^i16)(samples_ptr)
+        total_samples := int(frame_count * 2)
+        samples := mem.slice_ptr(samples_ptr_i16, total_samples)
+        // fmt.println("samples", len(samples))
+        // mem.free(samples_ptr)
+        wave[p].data = make([]i64, frame_count)
+        j := 0
+        for i:=0; i<int(total_samples); i+=2 {
+          x := i64((samples[i] + samples[i+1]) / 2)
+          wave[p].data[j] = x
+          j+=1
+        }
+        wave[p].size = u64(j)
+        wave[p].ispcm = true
+        wave[p].loop = false
+        wave[p].hz = 440.0
+      }
+    }
+  }
 } else if buf[0] == 'W' {
   str := string(buf[1:n])
     w := strconv.atoi(str)
@@ -447,28 +496,33 @@ main :: proc() {
   for w in 0..<WAVEFORMS {
     wave[w].data = empty
     wave[w].size = 1
-    wave[w].hz = 0
+    // wave[w].hz = 0
   }
 
-  wave[0].data = mksine(WAVE_SIZE*2)
+  wave[0].data = mksine(WAVE_SIZE)
   wave[0].size = u64(len(wave[0].data))
-  wave[0].base = 1
+  wave[0].ispcm = false
+  // wave[0].base = 1
   
   wave[1].data = mksqr(WAVE_SIZE/2)
   wave[1].size = u64(len(wave[1].data))
-  wave[1].base = 1
+  wave[1].ispcm = false
+  // wave[1].base = 1
 
   wave[2].data = mksawup(WAVE_SIZE)
   wave[2].size = u64(len(wave[2].data))
-  wave[2].base = 1
+  wave[2].ispcm = false
+  // wave[2].base = 1
 
   wave[3].data = mksawdn(WAVE_SIZE)
   wave[3].size = u64(len(wave[3].data))
-  wave[3].base = 1
+  wave[3].ispcm = false
+  // wave[3].base = 1
 
   wave[4].data = mktri(WAVE_SIZE)
   wave[4].size = u64(len(wave[4].data))
-  wave[4].base = 1
+  wave[4].ispcm = false
+  // wave[4].base = 1
   
   result = ma.device_init(nil, &config, &device)
   if result != .SUCCESS {
