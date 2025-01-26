@@ -44,6 +44,8 @@ Voice :: struct {
   sample: i64,
   audible: bool,
   ismod: bool,
+  running: bool,
+  loop: bool,
 }
 
 VOICES :: 16
@@ -67,6 +69,7 @@ mktri :: proc(size: int) -> []i64 {
   for i in 0..<len(table) {
     phase := f64(i)
     x := 0
+    
     if i < half {
       x = (2 * MAX_VALUE * i + half - 1) / half
     } else {
@@ -82,12 +85,7 @@ mksqr :: proc(size: int) -> []i64 {
   fsize := f64(len(table))
   half := size/2
   for i in 0..<len(table) {
-    x := 0
-    if i < half {
-      x = MAX_VALUE
-    } else {
-      x = -MAX_VALUE
-    }
+    x := MAX_VALUE if i < half else MIN_VALUE
     table[i] = i64(x)
   }
   return table
@@ -158,14 +156,16 @@ wave_gain :: proc(voice: int, g: f64) {
   synth[voice].gain_val = i64( ag * f64(GAIN_SCALE) )
 }
 
+wave_reset :: proc(voice: int) {
+  synth[voice].dds_acc = 0
+  synth[voice].running = true
+}
+
 wave_next :: proc(voice: int) -> i64 {
-  index := synth[voice].dds_acc >> DDS_FRAC
-  /*
-  // only is this wave is one-shot
-  if index > WAVE_SIZE {
-    index = 0
+  if synth[voice].running == false {
+    return 0
   }
-  */
+  index := synth[voice].dds_acc >> DDS_FRAC
   fmod := i64(0)
   vmod := synth[voice].dds_mod
   if vmod >= 0 {
@@ -180,8 +180,11 @@ wave_next :: proc(voice: int) -> i64 {
   sample := thewave.data[index % thewave.size]
   synth[voice].sample = sample
   synth[voice].dds_acc += ( u64(synth[voice].dds_inc + mod ) )
-  if index > thewave.size {
-
+  if index >= thewave.size {
+    if synth[voice].loop == false {
+      synth[voice].running = false
+      synth[voice].dds_acc = 0
+    }
   }
   index = index % thewave.size
   return sample
@@ -220,25 +223,21 @@ exsynthia :: proc(device: ^ma.device, output, input: rawptr, frame_count: u64) {
 }
 
 show_voice :: proc(voice: int, flag: bool) {
-  s := " "
-  if flag {
-    s = "*"
-  }
-  m := "0"
-  if synth[voice].ismod {
-    m = "1"
-  }
-  fmt.printf("%s v%d w%d f%g a%g F%d FS%d M%s # inc:%g\n",
+  s := "*" if flag else " "
+  m := 1 if synth[voice].ismod else 0
+  b := 1 if synth[voice].loop else 0
+
+  fmt.printf("%s v%d w%d b%d f%g a%g F%d FS%d M%d # inc:%g\n",
         s,
         voice,
         synth[voice].waveform,
+        b,
         synth[voice].hz,
         synth[voice].gain,
         synth[voice].dds_mod,
         synth[voice].dds_modexp,
         m,
         //
-        // synth[voice].dds_inc,
         f64(synth[voice].dds_inc) / f64(DDS_SCALE)
       )
 }
@@ -262,20 +261,10 @@ makebm :: proc(cols:int, rows:int) -> bm {
 }
 
 setbm :: proc(b: bm, x: int, y:int, c:int) {
-  ax := x
-  ay := y
-  if ax < 0 {
-    ax = 0
-  }
-  if ay < 0 {
-    ay = 0
-  }
-  if ax > b.rows-1 {
-    ax = b.rows-1
-  }
-  if ay > b.cols-1 {
-    ay = b.cols-1
-  }
+  ax := 0 if x < 0 else x
+  ax = b.rows-1 if ax > b.rows-1 else ax
+  ay := 0 if y < 0 else y
+  ay = b.cols-1 if ay > b.cols-1 else ay
   b.pixel[ay][ax] = c
 }
 
@@ -316,6 +305,15 @@ wire :: proc(voice:int, buf: []byte, n: int) -> int {
     str := string(buf[1:n])
     f := strconv.atof(str)
     wave_freq(current_voice, f)
+  } else if buf[0] == 'b' {
+    str := string(buf[1:n])
+    b := strconv.atoi(str)
+    synth[current_voice].loop = true if b == 1 else false
+  } else if buf[0] == 'l' {
+    str := string(buf[1:n])
+    g := strconv.atof(str)
+    synth[current_voice].running = true
+    wave_gain(current_voice, g)
   } else if buf[0] == 'a' {
     str := string(buf[1:n])
     g := strconv.atof(str)
@@ -333,11 +331,7 @@ wire :: proc(voice:int, buf: []byte, n: int) -> int {
     wave_freq(current_voice, f)
   } else if buf[0] == 'M' {
     str := string(buf[1:n])
-    if str[0] == '1' {
-      synth[current_voice].ismod = true
-    } else {
-      synth[current_voice].ismod = false
-    }
+    synth[current_voice].ismod = true if str[0] == '1' else false
   } else if buf[0] == 'F' {
     if buf[1] == 'S' {
       str := string(buf[2:n])
@@ -399,7 +393,14 @@ wire :: proc(voice:int, buf: []byte, n: int) -> int {
       b := makebm(COLS, ROWS)
       table := wave[w].data
       size := int(wave[w].size)
-      fmt.printf("size:%d\n", size)
+      info := "pcm" if wave[w].ispcm else "wave"
+      loop := "loop" if wave[w].loop else "1-shot"
+      fmt.printf("size:%d %s %gHz %s\n",
+        size,
+        info,
+        wave[w].hz,
+        loop
+      )
       for i in 0..<size {
         x := table[i]
         cx := mapper(int(x), MIN_VALUE, MAX_VALUE, 0, ROWS-1)
@@ -415,6 +416,8 @@ wire :: proc(voice:int, buf: []byte, n: int) -> int {
       last_wave := synth[current_voice].waveform
       synth[current_voice].waveform = w
       if w != last_wave {
+        synth[current_voice].loop = wave[w].loop
+        wave_reset(current_voice)
         wave_freq(current_voice, synth[current_voice].hz)
       }
     }
@@ -496,33 +499,25 @@ main :: proc() {
   for w in 0..<WAVEFORMS {
     wave[w].data = empty
     wave[w].size = 1
-    // wave[w].hz = 0
+    wave[w].hz = 1
+    wave[w].ispcm = false
+    wave[w].loop = true
   }
 
   wave[0].data = mksine(WAVE_SIZE)
   wave[0].size = u64(len(wave[0].data))
-  wave[0].ispcm = false
-  // wave[0].base = 1
   
   wave[1].data = mksqr(WAVE_SIZE/2)
   wave[1].size = u64(len(wave[1].data))
-  wave[1].ispcm = false
-  // wave[1].base = 1
 
   wave[2].data = mksawup(WAVE_SIZE)
   wave[2].size = u64(len(wave[2].data))
-  wave[2].ispcm = false
-  // wave[2].base = 1
 
   wave[3].data = mksawdn(WAVE_SIZE)
   wave[3].size = u64(len(wave[3].data))
-  wave[3].ispcm = false
-  // wave[3].base = 1
 
   wave[4].data = mktri(WAVE_SIZE)
   wave[4].size = u64(len(wave[4].data))
-  wave[4].ispcm = false
-  // wave[4].base = 1
   
   result = ma.device_init(nil, &config, &device)
   if result != .SUCCESS {
@@ -543,7 +538,9 @@ main :: proc() {
     synth[v].dds_acc = 0
     synth[v].dds_inc = 0
     synth[v].gain_val = 0
+    synth[v].running = true
     synth[v].audible = true
+    synth[v].loop = true
     synth[v].dds_mod = -1
     synth[v].dds_modscale = DDS_SCALE
     synth[v].dds_modexp = DDS_FRAC
