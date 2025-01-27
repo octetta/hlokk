@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:io"
 import "core:math"
 import "core:mem"
 import "core:os"
@@ -386,13 +387,18 @@ captureCount: u32
 config: ma.device_config
 device: ma.device
 
-wire :: proc(voice:int, buf: []byte, n: int) -> int {
+wire :: proc(voice:int, buf: []byte, n: int) -> (int, bool) {
   current_voice := voice
+  running := true
   //
   if buf[0] == 'f' {
     str := string(buf[1:n])
     f := strconv.atof(str)
     wave_freq(current_voice, f)
+  } else if buf[0] == ':' {
+    if buf[1] == 'q' {
+      running = false
+    }
   } else if buf[0] == 'b' {
     str := string(buf[1:n])
     b := strconv.atoi(str)
@@ -521,7 +527,22 @@ wire :: proc(voice:int, buf: []byte, n: int) -> int {
     }
   }
   //
-  return current_voice
+  return current_voice, running
+}
+
+import psx "core:sys/posix"
+orig_mode: psx.termios
+
+enable_raw_mode :: proc() {
+  res := psx.tcgetattr(psx.STDIN_FILENO, &orig_mode)
+  //psx.atexit(disable_raw_mode)
+  raw := orig_mode
+  raw.c_lflag -= {.ECHO, .ICANON}
+  res = psx.tcsetattr(psx.STDIN_FILENO, .TCSANOW, &raw)
+}
+
+disable_raw_mode :: proc() {
+  res := psx.tcsetattr(psx.STDIN_FILENO, .TCSANOW, &orig_mode)
 }
 
 main :: proc() {
@@ -634,13 +655,35 @@ main :: proc() {
     synth[v].dds_modexp = DDS_FRAC
   }
 
+  fmt.println("# test raw mode... press ESC for wire console")
+  enable_raw_mode()
+  defer disable_raw_mode()
+  in_stream := os.stream_from_handle(os.stdin)
+  running := true
+  for running {
+    ch, sz, err := io.read_rune(in_stream)
+    switch {
+      case err != nil:
+        break
+      case:
+        fmt.printf("%02x ", ch, flush=false)
+        if ch == 27 {
+          running = false
+        }
+    }
+  }
+  disable_raw_mode()
+
+  fmt.println("# Hlokk console. ctrl-d or :q to exit")
   current_voice := 0
-  for {
+  running = true
+  for running {
     buf: [256]byte
+    fmt.printf("# ")
     n, err := os.read(os.stdin, buf[:])
-    if err != nil || n <= 1 {
+    if err != nil || n == 0 {
       break
     }
-    current_voice = wire(current_voice, buf[:], n)
+    current_voice, running = wire(current_voice, buf[:], n)
   }
 }
