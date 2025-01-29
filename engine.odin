@@ -23,7 +23,7 @@ MIN_VALUE :: -32767
 Wave :: struct {
   data: []i64,
   size: u64,
-  ispcm: bool,
+  usehz: bool,
   loop: bool,
   hz: f64,
 }
@@ -32,17 +32,45 @@ WAVEFORMS :: 99
 
 wave: [WAVEFORMS]Wave
 
+
+/*
+
+time-ms,level
+o
+
+
+attack time -- starts when parameter of 'l' is > 0 ... that number is the sustain level, sets gate true
+decay time -- starts when parameter of 'l' is == 0 ... sets gate false
+
+
+gate = off -> to-sustain -> sustained -> to-release -> off
+
+
+
+*/
+
+GATE_OFF :: 0
+GATE_TO_SUSTAIN :: 1
+GATE_SUSTAINED :: 2
+GATE_TO_RELEASE :: 3
+
 Voice :: struct {
   waveform: int,
+  alt_waveform: int, // future wave morph?
   hz: f64,
-  dds_inc: i64,
-  dds_acc: u64,
-  dds_mod: i16,
-  dds_modexp: int,
-  dds_modscale: i64,
+  gate: int, // state used by 'l'? and ADSR see notes above
+  wave_inc: i64,
+  wave_acc: u64,
+  wave_mod: i16,
+  wave_modexp: int,
+  wave_modscale: i64,
   gain: f64,
-  gain_val: i64,
+  gain_val: i64, // used by 'a'
+  gain_inc: i64, // used by 'l'?
+  gain_acc: i64, // used by 'l'?
+  gain_limit: i64, // used by 'l'?
   sample: i64,
+  alt_sample: i64, // future wave morph?
   audible: bool,
   ismod: bool,
   running: bool,
@@ -139,11 +167,11 @@ GAIN_MASK :: GAIN_SCALE-1
 wave_freq :: proc(voice: int, f: f64) {
   synth[voice].hz = f
   size := wave[synth[voice].waveform].size
-  if wave[synth[voice].waveform].ispcm {
+  if wave[synth[voice].waveform].usehz {
     hz := wave[synth[voice].waveform].hz
-    synth[voice].dds_inc = i64( f / hz * DDS_SCALE )
+    synth[voice].wave_inc = i64( f / hz * DDS_SCALE )
   } else {
-    synth[voice].dds_inc = i64( f * f64(size) / SAMPLE_RATE * DDS_SCALE  )
+    synth[voice].wave_inc = i64( f * f64(size) / SAMPLE_RATE * DDS_SCALE  )
   }
 }
 
@@ -158,7 +186,7 @@ wave_gain :: proc(voice: int, g: f64) {
 }
 
 wave_reset :: proc(voice: int) {
-  synth[voice].dds_acc = 0
+  synth[voice].wave_acc = 0
   synth[voice].running = true
 }
 
@@ -166,25 +194,25 @@ wave_next :: proc(voice: int) -> i64 {
   if synth[voice].running == false {
     return 0
   }
-  index := synth[voice].dds_acc >> DDS_FRAC
+  index := synth[voice].wave_acc >> DDS_FRAC
   fmod := i64(0)
-  vmod := synth[voice].dds_mod
+  vmod := synth[voice].wave_mod
   if vmod >= 0 {
     fmod = synth[vmod].sample
   }
   mod := i64(fmod)
   if mod != 0 {
-    scale := synth[voice].dds_modscale
+    scale := synth[voice].wave_modscale
     mod *= scale
   }
   thewave := wave[synth[voice].waveform]
   sample := thewave.data[index % thewave.size]
   synth[voice].sample = sample
-  synth[voice].dds_acc += ( u64(synth[voice].dds_inc + mod ) )
+  synth[voice].wave_acc += ( u64(synth[voice].wave_inc + mod ) )
   if index >= thewave.size {
     if synth[voice].loop == false {
       synth[voice].running = false
-      synth[voice].dds_acc = 0
+      synth[voice].wave_acc = 0
     }
   }
   index = index % thewave.size
@@ -228,18 +256,20 @@ show_voice :: proc(voice: int, flag: bool) {
   m := 1 if synth[voice].ismod else 0
   b := 1 if synth[voice].loop else 0
 
-  fmt.printf("%s v%d w%d b%d f%g a%g F%d FS%d M%d # inc:%g\n",
+  F := "x" if synth[voice].wave_mod < 0 else fmt.tprintf("%d", synth[voice].wave_mod)
+
+  fmt.printf("%s v%d w%d b%d f%g a%g F%s FS%d M%d # inc:%g\n",
         s,
         voice,
         synth[voice].waveform,
         b,
         synth[voice].hz,
         synth[voice].gain,
-        synth[voice].dds_mod,
-        synth[voice].dds_modexp,
+        F,
+        synth[voice].wave_modexp,
         m,
         //
-        f64(synth[voice].dds_inc) / f64(DDS_SCALE)
+        f64(synth[voice].wave_inc) / f64(DDS_SCALE)
       )
 }
 
@@ -431,16 +461,16 @@ wire :: proc(voice:int, buf: []byte, n: int) -> (int, bool) {
       str := string(buf[2:n])
       s := strconv.atoi(str)
       exp := i64(1 << u64(s))
-      synth[current_voice].dds_modexp = s
-      synth[current_voice].dds_modscale = exp
+      synth[current_voice].wave_modexp = s
+      synth[current_voice].wave_modscale = exp
     } else {
       str := string(buf[1:n])
       v := strconv.atoi(str)
       if v >= 0 && v < VOICES {
         synth[v].ismod = true
-        synth[current_voice].dds_mod = i16(v)
+        synth[current_voice].wave_mod = i16(v)
       } else {
-        synth[current_voice].dds_mod = -1
+        synth[current_voice].wave_mod = -1
       }
     }
 } else if buf[0] == '<' {
@@ -472,7 +502,7 @@ wire :: proc(voice:int, buf: []byte, n: int) -> (int, bool) {
           j+=1
         }
         wave[p].size = u64(j)
-        wave[p].ispcm = true
+        wave[p].usehz = true
         wave[p].loop = false
         wave[p].hz = 440.0
       }
@@ -487,7 +517,7 @@ wire :: proc(voice:int, buf: []byte, n: int) -> (int, bool) {
       b := makebm(COLS, ROWS)
       table := wave[w].data
       size := int(wave[w].size)
-      info := "pcm" if wave[w].ispcm else "wave"
+      info := "hz-base" if wave[w].usehz else "size-base"
       loop := "loop" if wave[w].loop else "1-shot"
       fmt.printf("size:%d %s %gHz %s\n",
         size,
@@ -609,7 +639,7 @@ main :: proc() {
     wave[w].data = empty
     wave[w].size = 1
     wave[w].hz = 1
-    wave[w].ispcm = false
+    wave[w].usehz = false
     wave[w].loop = true
   }
 
@@ -644,15 +674,17 @@ main :: proc() {
 
   for v in 0..<VOICES {
     synth[v].waveform = 0
-    synth[v].dds_acc = 0
-    synth[v].dds_inc = 0
+    synth[v].wave_acc = 0
+    synth[v].wave_inc = 0
     synth[v].gain_val = 0
     synth[v].running = true
     synth[v].audible = true
     synth[v].loop = true
-    synth[v].dds_mod = -1
-    synth[v].dds_modscale = DDS_SCALE
-    synth[v].dds_modexp = DDS_FRAC
+    synth[v].wave_mod = -1
+    synth[v].wave_modscale = DDS_SCALE
+    synth[v].wave_modexp = DDS_FRAC
+    //
+    synth[v].gate = GATE_OFF
   }
 
   fmt.println("# test raw mode... press ESC for wire console")
