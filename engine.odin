@@ -10,6 +10,31 @@ import "core:time"
 
 import ma "vendor:miniaudio"
 
+import "core:thread"
+import rl "vendor:raylib"
+
+t1len :: 5000
+t1h :: 256
+t1w :: 512
+t1buf: [t1len]i16
+t1ptr := 0
+t1run := true
+t1th: ^thread.Thread
+t1 :: proc(t: ^thread.Thread) {
+  rl.SetConfigFlags({.VSYNC_HINT})
+  rl.InitWindow(t1w,t1h, "scope")
+  for !rl.WindowShouldClose() {
+    rl.BeginDrawing()
+    rl.ClearBackground(rl.BLACK)
+    for i in 0..<t1len {
+      cx := mapper(i, 0, t1len, 0, t1w-1)
+      cy := mapper(int(t1buf[i]), MIN_VALUE, MAX_VALUE, 0, t1h-1)
+      rl.DrawRectangle(i32(cx), i32(cy), 1, 1, rl.GREEN)
+    }
+    rl.EndDrawing()
+  }
+}
+
 SAMPLE_RATE :: 44100
 CHANNELS :: 2
 
@@ -65,6 +90,8 @@ Voice :: struct {
   wave_modexp: int,
   wave_modscale: i64,
   gain: f64,
+  attack_ms: int, // used by 'A'
+  decay_ms: int, // used by 'A'
   gain_val: i64, // used by 'a'
   gain_inc: i64, // used by 'l'?
   gain_acc: i64, // used by 'l'?
@@ -232,20 +259,43 @@ exsynthia :: proc(device: ^ma.device, output, input: rawptr, frame_count: u64) {
   fi := u64(0)
 
   i: u64
+  saturatedmin := false
+  saturatedmax := false
   for i in 0..<frame_count {
     left := i16(0)
     right := i16(0)
     for v in 0..<VOICES {
       sample := wave_next(v) * synth[v].gain_val / GAIN_SCALE
+      // saturation...
+      if sample > MAX_VALUE {
+        sample = MAX_VALUE
+        saturatedmax = true
+      } else if sample < MIN_VALUE {
+        sample = MIN_VALUE
+        saturatedmin = true
+      }
       synth[v].sample = sample
       samplei16 := i16( sample )
       if !synth[v].ismod {
-        left += samplei16
-        right += samplei16
+        if saturatedmin {
+          left = MIN_VALUE
+          right = MIN_VALUE
+        } else if saturatedmax {
+          left = MAX_VALUE
+          right = MAX_VALUE
+        } else {
+          left += samplei16
+          right += samplei16
+        }
       }
     }
     out_s16[fi+0] = left
     out_s16[fi+1] = right
+    t1buf[t1ptr] = (left+right)/2
+    t1ptr += 1
+    if t1ptr >= t1len {
+      t1ptr = 0
+    }
     fi += CHANNELS
   }
 
@@ -258,7 +308,7 @@ show_voice :: proc(voice: int, flag: bool) {
 
   F := "x" if synth[voice].wave_mod < 0 else fmt.tprintf("%d", synth[voice].wave_mod)
 
-  fmt.printf("%s v%d w%d b%d f%g a%g F%s FS%d M%d # inc:%g\n",
+  fmt.printf("%s v%d w%d b%d f%g a%g F%s FS%d M%d A%d # inc:%g\n",
         s,
         voice,
         synth[voice].waveform,
@@ -268,6 +318,7 @@ show_voice :: proc(voice: int, flag: bool) {
         F,
         synth[voice].wave_modexp,
         m,
+        synth[voice].attack_ms,
         //
         f64(synth[voice].wave_inc) / f64(DDS_SCALE)
       )
@@ -428,6 +479,11 @@ wire :: proc(voice:int, buf: []byte, n: int) -> (int, bool) {
   } else if buf[0] == ':' {
     if buf[1] == 'q' {
       running = false
+      t1run = false
+    }
+    if buf[1] == 'g' {
+      t1th = thread.create(t1)
+      thread.start(t1th)
     }
   } else if buf[0] == 'b' {
     str := string(buf[1:n])
@@ -436,8 +492,22 @@ wire :: proc(voice:int, buf: []byte, n: int) -> (int, bool) {
   } else if buf[0] == 'l' {
     str := string(buf[1:n])
     g := strconv.atof(str)
-    synth[current_voice].running = true
+    synth[current_voice].gate = GATE_TO_SUSTAIN
+    wave_reset(current_voice)
     wave_gain(current_voice, g)
+  } else if buf[0] == 'A' {
+    str := string(buf[1:n])
+    a := strconv.atoi(str)
+    if a >= 0 {
+      synth[current_voice].attack_ms = a
+      /*
+        44100 / 1000 = 44.1ms per sample
+        so if A10 (attack of 10ms)
+        'l4' would be achieved in 10ms
+        which means the increment from 0 to 4
+        means a gain increase of X every 441 samples
+      */
+    }
   } else if buf[0] == 'a' {
     str := string(buf[1:n])
     g := strconv.atof(str)

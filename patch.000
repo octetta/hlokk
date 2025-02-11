@@ -1,0 +1,3 @@
+v0 w24 b1 f440 a10 F1 FS10 M0 # inc:1
+v1 w0 b1 f55.5 a0.1 F2 FS14 M1 # inc:55.5
+v2 w0 b1 f0.25 a1 Fx FS15 M1 # inc:0.25
