@@ -21,6 +21,7 @@ t1ptr := 0
 t1run := true
 t1th: ^thread.Thread
 t1 :: proc(t: ^thread.Thread) {
+  rl.SetTraceLogLevel(rl.TraceLogLevel.WARNING)
   rl.SetConfigFlags({.VSYNC_HINT})
   rl.InitWindow(t1w,t1h, "scope")
   for !rl.WindowShouldClose() {
